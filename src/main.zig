@@ -5,6 +5,7 @@ const BoundedArray = @import("bounded_array").BoundedArray;
 
 const math = std.math;
 const rand = std.Random;
+const fmt = std.fmt;
 
 const Vector2 = rl.Vector2;
 
@@ -18,9 +19,18 @@ const Ship = struct {
     dead: bool = false,
     rot: f32,
     deathTime: f32 = 0.0,
+    lives: u8 = 3,
+    invulTime: f32 = 0.0,
+    invisTime: f32 = 0.0,
 
     fn isDead(self: Ship) bool {
         return self.deathTime != 0.0;
+    }
+    fn isInvul(self: Ship) bool {
+        return self.invulTime != 0.0;
+    }
+    fn cantDraw(self: Ship) bool {
+        return self.invisTime != 0.0;
     }
 };
 
@@ -50,6 +60,16 @@ const Asteroid = struct {
     vel: Vector2,
     size: AsteroidSize,
     seed: u64,
+
+    fn onDeath(self: Asteroid) !void {
+        try spawnAsteroidDestructionParticles(self.pos);
+        try splitAsteroid(self.size, self.pos);
+        state.score += switch (self.size) {
+            .BIG => 500,
+            .MEDIUM => 100,
+            .SMALL => 50,
+        };
+    }
 };
 
 const ParticleType = enum {
@@ -82,6 +102,7 @@ const Projectile = struct {
 const State = struct {
     now: f32 = 0.0,
     delta: f32 = 0.0,
+    score: u32 = 0,
     ship: Ship,
     asteroids: std.ArrayList(Asteroid),
     particles: std.ArrayList(Particle),
@@ -138,7 +159,7 @@ fn drawAsteroid(pos: Vector2, size: AsteroidSize, seed: u64) !void {
     );
 }
 
-fn spawnDestructionParticles(pos: Vector2) !void {
+fn spawnShipDestructionParticles(pos: Vector2) !void {
     for (0..5) |_| {
         const angle = math.tau * state.rand.float(f32);
         try state.particles.append(
@@ -164,9 +185,34 @@ fn spawnDestructionParticles(pos: Vector2) !void {
     }
 }
 
+fn spawnAsteroidDestructionParticles(pos: Vector2) !void {
+    for (0..10) |_| {
+        const angle = math.tau * state.rand.float(f32);
+        try state.particles.append(
+            state.alloc,
+            .{
+                .pos = pos.add(Vector2.init(
+                    state.rand.float(f32) * 3,
+                    state.rand.float(f32) * 3,
+                )),
+                .vel = Vector2.init(
+                    math.cos(angle),
+                    math.sin(angle),
+                ).scale(2.0 * state.rand.float(f32)),
+                .ttl = 1.0 + state.rand.float(f32),
+                .values = .{
+                    .DOT = .{
+                        .radius = 1 + (1.3 * state.rand.float(f32)),
+                    },
+                },
+            },
+        );
+    }
+}
+
 fn update() !void {
     // Rotations / second
-    const ROT_SPEED = 1.4;
+    const ROT_SPEED = 1;
     const SHIP_SPEED = 24;
 
     const BULLET_SPEED = 600.0;
@@ -208,6 +254,11 @@ fn update() !void {
         @mod(state.ship.pos.y, SIZE.y),
     );
 
+    if (state.asteroids.items.len <= 0) {
+        try spawnWave();
+        state.ship.lives += 1;
+    }
+
     for (state.asteroids.items) |*a| {
         a.pos = a.pos.add(a.vel);
         a.pos = Vector2.init(
@@ -215,10 +266,15 @@ fn update() !void {
             @mod(a.pos.y, SIZE.y),
         );
         // Check for ship v. asteroid collision
-        if (!state.ship.isDead() and a.pos.distance(state.ship.pos) < a.size.size() * 0.6) {
-            state.ship.deathTime = state.now;
-
-            try spawnDestructionParticles(state.ship.pos);
+        if (!state.ship.isDead() and a.pos.distance(state.ship.pos) < a.size.size() * 0.65 and !state.ship.isInvul()) {
+            try spawnShipDestructionParticles(state.ship.pos);
+            state.ship.pos = SIZE.scale(0.5);
+            state.ship.lives -= 1;
+            state.ship.invulTime = state.now;
+            state.ship.invisTime = state.now;
+            if (state.ship.lives <= 0) {
+                state.ship.deathTime = state.now;
+            }
         }
     }
 
@@ -267,35 +323,12 @@ fn update() !void {
         // Check asteroid collision
         var hit = false;
         for (state.asteroids.items, 0..) |a, ai| {
-            if (b.pos.distance(a.pos) < a.size.size() * 0.6) {
+            if (b.pos.distance(a.pos) < a.size.size() * 0.65) {
                 hit = true;
 
                 _ = state.projectiles.swapRemove(i);
 
-                try splitAsteroid(a.size, a.pos);
-
-                for (0..5) |_| {
-                    const angle = math.tau * state.rand.float(f32);
-                    try state.particles.append(
-                        state.alloc,
-                        .{
-                            .pos = a.pos.add(Vector2.init(
-                                state.rand.float(f32) * 3,
-                                state.rand.float(f32) * 3,
-                            )),
-                            .vel = Vector2.init(
-                                math.cos(angle),
-                                math.sin(angle),
-                            ).scale(2.0 * state.rand.float(f32)),
-                            .ttl = 1.0 + state.rand.float(f32),
-                            .values = .{
-                                .DOT = .{
-                                    .radius = 1 + state.rand.float(f32),
-                                },
-                            },
-                        },
-                    );
-                }
+                try a.onDeath();
 
                 _ = state.asteroids.swapRemove(ai);
 
@@ -312,22 +345,32 @@ fn update() !void {
     if (state.ship.isDead() and (state.now - state.ship.deathTime) > 3.5) {
         try resetStage();
     }
+    if (state.ship.isInvul() and (state.now - state.ship.invulTime) > 2.5) {
+        state.ship.invulTime = 0.0;
+    }
+    if (state.ship.cantDraw() and (state.now - state.ship.invisTime) > 1.0) {
+        state.ship.invisTime = 0.0;
+    }
 }
 
+fn drawShip(pos: Vector2, rot: ?f32) void {
+    const final_rot = rot orelse math.pi;
+    drawLines(
+        pos,
+        SCALE,
+        final_rot,
+        &.{
+            Vector2.init(-0.4, -0.5),
+            Vector2.init(0.0, 0.5),
+            Vector2.init(0.4, -0.5),
+            Vector2.init(0.2, -0.35),
+            Vector2.init(-0.2, -0.35),
+        },
+    );
+}
 fn render() !void {
-    if (!state.ship.isDead()) {
-        drawLines(
-            state.ship.pos,
-            SCALE,
-            state.ship.rot,
-            &.{
-                Vector2.init(-0.4, -0.5),
-                Vector2.init(0.0, 0.5),
-                Vector2.init(0.4, -0.5),
-                Vector2.init(0.3, -0.4),
-                Vector2.init(-0.3, -0.4),
-            },
-        );
+    if (!state.ship.isDead() and !state.ship.cantDraw()) {
+        drawShip(state.ship.pos, state.ship.rot);
         if (rl.isKeyDown(.w) and @mod(@as(i32, @intFromFloat(state.now * 20)), 2) == 0) {
             drawLines(
                 state.ship.pos,
@@ -341,6 +384,15 @@ fn render() !void {
             );
         }
     }
+    for (0..state.ship.lives) |l| {
+        drawShip(Vector2.init(25 + (@as(f32, @floatFromInt(@as(u32, @intCast(l)))) * 40), 75), null);
+    }
+
+    var buf: [32]u8 = undefined;
+    const slice = try fmt.bufPrint(buf[0..], "{:0>4}", .{state.score});
+    buf[slice.len] = 0;
+    const str: [:0]const u8 = @ptrCast(buf[0 .. slice.len + 1]);
+    rl.drawText(str, 10, 10, 40, .white);
 
     for (state.asteroids.items) |a| {
         try drawAsteroid(a.pos, a.size, a.seed);
@@ -382,6 +434,27 @@ fn splitAsteroid(size: AsteroidSize, pos: Vector2) !void {
                 size.velScale() * 3.0 * state.rand.float(f32),
             ),
             .size = s,
+            .seed = state.rand.int(u64),
+        });
+    }
+}
+
+fn spawnWave() !void {
+    for (0..20) |_| {
+        const angle = math.tau * state.rand.float(f32);
+        const size = state.rand.enumValue(AsteroidSize);
+        try state.asteroids.append(state.alloc, .{
+            .pos = Vector2.init(
+                state.rand.float(f32) * SIZE.x,
+                state.rand.float(f32) * SIZE.y,
+            ),
+            .vel = Vector2.init(
+                math.cos(angle),
+                math.sin(angle),
+            ).scale(
+                size.velScale() * 3.0 * state.rand.float(f32),
+            ),
+            .size = size,
             .seed = state.rand.int(u64),
         });
     }
