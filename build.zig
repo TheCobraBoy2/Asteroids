@@ -26,6 +26,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const bounded_array = b.dependency("bounded_array", .{});
+
     const raylib = raylib_dep.module("raylib"); // main raylib module
     const raygui = raylib_dep.module("raygui"); // raygui module
     const raylib_artifact = raylib_dep.artifact("raylib"); // raylib C library
@@ -95,6 +97,7 @@ pub fn build(b: *std.Build) void {
     exe.linkLibrary(raylib_artifact);
     exe.root_module.addImport("raylib", raylib);
     exe.root_module.addImport("raygui", raygui);
+    exe.root_module.addImport("bounded_array", bounded_array.module("bounded_array"));
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
