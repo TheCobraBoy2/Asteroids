@@ -64,6 +64,13 @@ const Asteroid = struct {
     fn onDeath(self: Asteroid) !void {
         try spawnAsteroidDestructionParticles(self.pos);
         try splitAsteroid(self.size, self.pos);
+
+        switch (self.size) {
+            .BIG => rl.playSound(state.sfx.large),
+            .MEDIUM => rl.playSound(state.sfx.med),
+            .SMALL => rl.playSound(state.sfx.small),
+        }
+
         state.score += switch (self.size) {
             .BIG => 500,
             .MEDIUM => 100,
@@ -99,16 +106,30 @@ const Projectile = struct {
     ttl: f32,
 };
 
+const Sfx = struct {
+    fire: rl.Sound,
+    thrust: rl.Sound,
+    beat1: rl.Sound,
+    beat2: rl.Sound,
+    small: rl.Sound,
+    med: rl.Sound,
+    large: rl.Sound,
+    extraLife: rl.Sound,
+};
+
 const State = struct {
     now: f32 = 0.0,
     delta: f32 = 0.0,
     score: u32 = 0,
+    music_timer: f32 = 0.0,
     ship: Ship,
+    sfx: Sfx,
     asteroids: std.ArrayList(Asteroid),
     particles: std.ArrayList(Particle),
     projectiles: std.ArrayList(Projectile),
     rand: std.Random,
     alloc: std.mem.Allocator,
+    next_beat: i32 = 1,
 };
 var state: State = undefined;
 
@@ -218,30 +239,35 @@ fn update() !void {
     const BULLET_SPEED = 600.0;
     const BULLET_TTL = 1.5;
 
-    if (rl.isKeyPressed(.space) and !state.ship.isDead()) {
-        const angle = state.ship.rot + (math.pi * 0.5);
-        const dir = Vector2.init(math.cos(angle), math.sin(angle));
+    if (!state.ship.isDead() and !state.ship.cantDraw()) {
+        if (rl.isKeyPressed(.space) and !state.ship.isDead()) {
+            const angle = state.ship.rot + (math.pi * 0.5);
+            const dir = Vector2.init(math.cos(angle), math.sin(angle));
+            rl.playSound(state.sfx.fire);
 
-        try state.projectiles.append(state.alloc, .{
-            .pos = state.ship.pos.add(dir.scale(SCALE * 0.7)),
-            .vel = dir.scale(BULLET_SPEED),
-            .ttl = BULLET_TTL,
-        });
-    }
+            try state.projectiles.append(state.alloc, .{
+                .pos = state.ship.pos.add(dir.scale(SCALE * 0.7)),
+                .vel = dir.scale(BULLET_SPEED),
+                .ttl = BULLET_TTL,
+            });
+        }
 
-    if (rl.isKeyDown(.a)) {
-        state.ship.rot -= state.delta * math.tau * ROT_SPEED;
-    }
+        if (rl.isKeyDown(.a)) {
+            state.ship.rot -= state.delta * math.tau * ROT_SPEED;
+        }
 
-    if (rl.isKeyDown(.d)) {
-        state.ship.rot += state.delta * math.tau * ROT_SPEED;
-    }
+        if (rl.isKeyDown(.d)) {
+            state.ship.rot += state.delta * math.tau * ROT_SPEED;
+        }
 
-    const dirAngle = state.ship.rot + (math.pi * 0.5);
-    const shipDir = Vector2.init(math.cos(dirAngle), math.sin(dirAngle));
+        const dirAngle = state.ship.rot + (math.pi * 0.5);
+        const shipDir = Vector2.init(math.cos(dirAngle), math.sin(dirAngle));
 
-    if (rl.isKeyDown(.w)) {
-        state.ship.vel = state.ship.vel.add(shipDir.scale(state.delta * SHIP_SPEED));
+        if (rl.isKeyDown(.w)) {
+            state.ship.vel = state.ship.vel.add(shipDir.scale(state.delta * SHIP_SPEED));
+            const s = try rl.loadSound("resources/thrust.wav");
+            rl.playSound(s);
+        }
     }
 
     const DRAG = 0.03;
@@ -255,8 +281,9 @@ fn update() !void {
     );
 
     if (state.asteroids.items.len <= 0) {
-        try spawnWave();
+        try spawnWave(5);
         state.ship.lives += 1;
+        rl.playSound(state.sfx.extraLife);
     }
 
     for (state.asteroids.items) |*a| {
@@ -272,6 +299,8 @@ fn update() !void {
             state.ship.lives -= 1;
             state.ship.invulTime = state.now;
             state.ship.invisTime = state.now;
+            state.ship.vel = Vector2.init(0.0, 0.0);
+            state.ship.rot = 0.0;
             if (state.ship.lives <= 0) {
                 state.ship.deathTime = state.now;
             }
@@ -298,7 +327,6 @@ fn update() !void {
         }
     }
 
-    // Update bullets
     i = 0;
     while (i < state.projectiles.items.len) {
         var b = state.projectiles.items[i];
@@ -439,10 +467,10 @@ fn splitAsteroid(size: AsteroidSize, pos: Vector2) !void {
     }
 }
 
-fn spawnWave() !void {
-    for (0..20) |_| {
+fn spawnWave(count: usize) !void {
+    for (0..count) |_| {
         const angle = math.tau * state.rand.float(f32);
-        const size = state.rand.enumValue(AsteroidSize);
+        const size = AsteroidSize.BIG;
         try state.asteroids.append(state.alloc, .{
             .pos = Vector2.init(
                 state.rand.float(f32) * SIZE.x,
@@ -454,7 +482,7 @@ fn spawnWave() !void {
             ).scale(
                 size.velScale() * 3.0 * state.rand.float(f32),
             ),
-            .size = size,
+            .size = AsteroidSize.BIG,
             .seed = state.rand.int(u64),
         });
     }
@@ -469,25 +497,38 @@ fn resetStage() !void {
     };
     //TODO: Clear asteroids on player lose
     // Is this the best way to do this?
+    state.score = 0;
     state.asteroids.clearRetainingCapacity();
+    state.projectiles.clearAndFree(state.alloc);
+    state.particles.clearAndFree(state.alloc);
 
-    for (0..20) |_| {
-        const angle = math.tau * state.rand.float(f32);
-        const size = state.rand.enumValue(AsteroidSize);
-        try state.asteroids.append(state.alloc, .{
-            .pos = Vector2.init(
-                state.rand.float(f32) * SIZE.x,
-                state.rand.float(f32) * SIZE.y,
-            ),
-            .vel = Vector2.init(
-                math.cos(angle),
-                math.sin(angle),
-            ).scale(
-                size.velScale() * 3.0 * state.rand.float(f32),
-            ),
-            .size = size,
-            .seed = state.rand.int(u64),
-        });
+    try spawnWave(5);
+}
+
+fn min(a: f32, b: f32) f32 {
+    return if (a < b) a else b;
+}
+
+fn updateMusic() !void {
+    const BASE_INTERVAL: f32 = 0.65;
+    const MAX_ASTEROIDS: f32 = 20.0;
+
+    const asteroid_count: f32 = @floatFromInt(state.asteroids.items.len);
+    const interval = BASE_INTERVAL * (1.0 - min(asteroid_count / MAX_ASTEROIDS, 1.0) * 0.5);
+
+    state.music_timer += state.delta;
+
+    if (state.music_timer >= interval) {
+        const beat_to_play = switch (state.next_beat) {
+            1 => state.sfx.beat1,
+            2 => state.sfx.beat2,
+            else => unreachable,
+        };
+
+        rl.playSound(beat_to_play);
+
+        state.next_beat = if (state.next_beat == 1) 2 else 1;
+        state.music_timer = 0.0;
     }
 }
 
@@ -500,10 +541,20 @@ pub fn main() !void {
     defer std.debug.assert(gpa.deinit() == .ok);
 
     rl.initWindow(SIZE.x, SIZE.y, window_title);
+    rl.initAudioDevice();
     rl.setTargetFPS(60);
     defer rl.closeWindow();
 
     var prng = rand.Xoshiro256.init(@bitCast(std.time.timestamp()));
+
+    const fire_sound = try rl.loadSound("resources/fire.wav");
+    const thrust_sound = try rl.loadSound("resources/thrust.wav");
+    const extra_sound = try rl.loadSound("resources/extraShip.wav");
+    const beat1 = try rl.loadSound("resources/beat1.wav");
+    const beat2 = try rl.loadSound("resources/beat2.wav");
+    const bangSmall = try rl.loadSound("resources/bangSmall.wav");
+    const bangMed = try rl.loadSound("resources/bangMedium.wav");
+    const bangLarge = try rl.loadSound("resources/bangLarge.wav");
 
     state = .{
         .ship = .{
@@ -511,12 +562,23 @@ pub fn main() !void {
             .vel = Vector2.init(0, 0),
             .rot = 0.0,
         },
+        .sfx = .{
+            .fire = fire_sound,
+            .thrust = thrust_sound,
+            .extraLife = extra_sound,
+            .beat1 = beat1,
+            .beat2 = beat2,
+            .small = bangSmall,
+            .med = bangMed,
+            .large = bangLarge,
+        },
         .asteroids = try std.ArrayList(Asteroid).initCapacity(allocator, 0),
         .particles = try std.ArrayList(Particle).initCapacity(allocator, 0),
         .projectiles = try std.ArrayList(Projectile).initCapacity(allocator, 0),
         .rand = prng.random(),
         .alloc = allocator,
     };
+
     defer state.asteroids.deinit(allocator);
     defer state.particles.deinit(allocator);
     defer state.projectiles.deinit(allocator);
@@ -528,6 +590,8 @@ pub fn main() !void {
         state.now += state.delta;
 
         try update();
+
+        try updateMusic();
 
         rl.beginDrawing();
         defer rl.endDrawing();

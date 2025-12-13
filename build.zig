@@ -94,6 +94,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    if (target.result.os.tag == .windows) {
+        if (optimize == .Debug) {
+            exe.subsystem = .Console;
+        } else {
+            exe.subsystem = .Windows;
+        }
+    }
+
     exe.linkLibrary(raylib_artifact);
     exe.root_module.addImport("raylib", raylib);
     exe.root_module.addImport("raygui", raygui);
